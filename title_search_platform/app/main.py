@@ -1,8 +1,5 @@
 from fastapi import FastAPI
-from app import file_service, db_manager
-
-# Ensure singleton instance is created before use
-_ = db_manager.DBMetadataManager()
+from title_search_platform.app import file_service, db_manager
 
 app = FastAPI(title="Title Search Platform API")
 
@@ -16,7 +13,7 @@ def on_startup():
     - Create database tables.
     """
     print("Application starting up...")
-    db_manager.db_metadata_manager.create_tables()
+    db_manager.create_tables()
     print("Database tables checked/created.")
 
 @app.get("/")
