@@ -1,9 +1,43 @@
+# Core backend and web framework
 fastapi==0.115.8
 uvicorn==0.23.2
 pydantic==2.10.6
+requests
+
+# Database
 mysql-connector-python==8.0.32
 SQLAlchemy==1.4.48
+
+# MinIO S3 client
 minio==7.2.10
+
+# PDF and OCR processing
 pdfplumber==0.11.5
+pymupdf==1.23.21
+pytesseract==0.3.10
+Pillow==10.3.0
+
+# Env + file upload
 python-dotenv==1.0.1
 python-multipart==0.0.17
+
+# NLP and Transformers
+sentence-transformers==2.2.2
+transformers==4.28.1
+nltk==3.9.1
+scikit-learn>=0.24.2
+huggingface_hub==0.14.1
+
+# PyTorch CPU versions (from official torch repo)
+numpy<2.0
+torch==2.1.0+cpu
+torchvision==0.16.0+cpu
+torchaudio==2.1.0+cpu
+
+#NER-model
+spacy==3.7.2
+lxml>=4.9.3
+
+
+# Needed to get +cpu wheels from PyTorch
+-f https://download.pytorch.org/whl/torch_stable.html
