@@ -1,4 +1,4 @@
-version: "3.9"
+version: '3.8'
 
 services:
   api:
@@ -7,24 +7,28 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    volumes:
+      - ./app:/app/app # For hot-reloading in development
+      - ./.env:/app/.env # Mount .env file
     depends_on:
       db:
         condition: service_healthy
       minio:
         condition: service_healthy
     environment:
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-      MYSQL_HOST: db
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_PORT: ${MYSQL_PORT}
-      LABEL_STUDIO_URL: http://labelstudio:8080
-      LABEL_STUDIO_TOKEN: ${LABEL_STUDIO_TOKEN}
-      LABEL_STUDIO_PID: ${LABEL_STUDIO_PID}
+      # These are read by the Python application from /app/.env
+      # The values in .env should be set correctly for inter-service communication
+      # e.g., MINIO_ENDPOINT=http://minio:9000, MYSQL_HOST=db
+      # We list them here to make dependencies clear, but Python reads them from the mounted .env
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=${MINIO_BUCKET}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_PORT=${MYSQL_PORT}
 
   db:
     image: mysql:8.0
@@ -38,41 +42,30 @@ services:
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER}", "-p${MYSQL_PASSWORD}"]
-      interval: 10s
-      retries: 5
-      timeout: 5s
-      start_period: 10s
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost", "-u", "${MYSQL_USER}", "-p${MYSQL_PASSWORD}"]
+      timeout: 20s
+      retries: 10
+      start_period: 10s # Give some time for mysql to initialize
+    # command: --default-authentication-plugin=mysql_native_password # May be needed for some clients
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2024-07-03T19-00-03Z # Using a more recent release
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000" # API
+      - "9001:9001" # Console
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY} # MinIO uses these as root credentials
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  labelstudio:
-    image: heartexlabs/label-studio:latest
-    ports:
-      - "8081:8080"
-    environment:
-      - LABEL_STUDIO_USERNAME=admin
-      - LABEL_STUDIO_PASSWORD=password
-    volumes:
-      - labelstudio_data:/label-studio/data
+      interval: 5s
+      timeout: 20s
+      retries: 10
+      start_period: 5s # Give some time for minio to initialize
 
 volumes:
-  db_data:
-  minio_data:
-  labelstudio_data:
+  db_data: {}
+  minio_data: {}

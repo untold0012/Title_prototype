@@ -1,42 +1,29 @@
+# Start from a Python base image
 FROM python:3.9-slim
 
-# Set working directory
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+# Set a working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libopenblas-dev \
-    libomp-dev \
-    tesseract-ocr \
-    libtesseract-dev \
-    poppler-utils \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    curl \
-    tesseract-ocr-eng \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set NLTK data path for both install and runtime
-ENV NLTK_DATA=/usr/share/nltk_data
-
-# Copy only requirements first (for caching)
+# Copy requirements.txt to the working directory
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# Install dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Download NLTK and spaCy models
-RUN python -c "import nltk; nltk.download('punkt', download_dir='/usr/share/nltk_data')"
-RUN python -m spacy download en_core_web_sm
-
-# Copy app source and environment config
+# Copy the application code into the working directory
+# This assumes your application code is in a directory named 'app' at the root
+# of your build context, and your .env file is also at the root.
 COPY ./app /app/app
 COPY .env /app/.env
 
-# Expose port and run the API
+# Expose the port the application runs on
 EXPOSE 8000
+
+# Define the command to run the application
+# Ensure your main FastAPI app instance is accessible via 'app.main:app'
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
