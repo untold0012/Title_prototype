@@ -1,8 +1,11 @@
 import os
 import datetime
 import logging
-
-import requests
+from label_studio_sdk.client import LabelStudio
+from label_studio_sdk.label_interface import LabelInterface
+from fastapi import UploadFile, File, HTTPException
+from typing import Annotated
+import os
 from app.entity_extractor import extract_entities_semantic
 import fitz  # PyMuPDF
 import pytesseract
@@ -25,7 +28,7 @@ _ = db_manager.DBMetadataManager()
 router = APIRouter()
 
 LABEL_STUDIO_URL   = os.getenv("LABEL_STUDIO_URL", "http://labelstudio:8080")
-LABEL_STUDIO_TOKEN = os.getenv("LABEL_STUDIO_TOKEN", "changeme")
+LABEL_STUDIO_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6ODA1ODM2NTk0OSwiaWF0IjoxNzUxMTY1OTQ5LCJqdGkiOiIzMmZlZGUwNDdiZjU0NTVmOWIxNTFjZjJmNTlmMjcxNSIsInVzZXJfaWQiOjJ9.EfpYrE1ZrH97eRj5aAFZPCVCMocp6FGYyeyMKZKhAls" 
 LABEL_STUDIO_PID   = os.getenv("LABEL_STUDIO_PID", "1")
 
 class FileUploadResponse(BaseModel):
@@ -37,8 +40,6 @@ class FileUploadResponse(BaseModel):
     total_pages: int
     uploaded_time: datetime.datetime
     extracted_text: str
-    document_type: str
-    extracted_entities: dict
 
 class TextInput(BaseModel):
     text: str
@@ -110,9 +111,7 @@ async def upload_pdf_file(file: Annotated[UploadFile, File()]):
     try:
         total_pages, extracted_text = extract_text_hybrid(file)
         file.file.seek(0)
-
-        document_type = classify_doc_type(extracted_text)
-        extracted_entities = extract_entities_semantic(extracted_text, document_type)
+        clean_text=clean_extracted_text(extracted_text)
 
     except Exception as e:
         logger.error(f"Text extraction or entity extraction failed: {e}")
@@ -155,39 +154,79 @@ async def upload_pdf_file(file: Annotated[UploadFile, File()]):
         file_size=file_size,
         total_pages=total_pages,
         uploaded_time=uploaded_time,
-        extracted_text=extracted_text,
-        document_type=document_type,
-        extracted_entities=extracted_entities
+        extracted_text=clean_text,
     )
+
 
 @router.post("/create-label-task/")
 async def create_label_task(file: Annotated[UploadFile, File()]):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # Step 1: Extract text using your hybrid extractor
+    # Step 1: Extract text
     total_pages, extracted_text = extract_text_hybrid(file)
 
-    # Step 2: Clean the text
+    # Step 2: Clean text
     cleaned_text = clean_extracted_text(extracted_text)
 
-    # Step 3: Prepare and send to Label Studio
-    task = {"data": {"text": cleaned_text}}
-    headers = {
-        "Authorization": f"Token {LABEL_STUDIO_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    url = f"{LABEL_STUDIO_URL}/api/projects/{LABEL_STUDIO_PID}/import?format=JSON"
-
+    # Step 3: Connect to Label Studio
     try:
-        resp = requests.post(url, json=[task], headers=headers, timeout=10)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Label Studio API error: {str(e)}")
+        ls = LabelStudio(
+            base_url=os.getenv("LABEL_STUDIO_URL", "http://labelstudio:8080"),
+            api_key=LABEL_STUDIO_API_KEY
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Label Studio connection failed: {str(e)}")
+
+    # Step 4: Create or reuse project
+    project = None
+    project_title = "NER Labeling (Auto)"
+    try:
+        for p in ls.projects.list():
+            if p.title == project_title:
+                project = p
+                break
+
+        if not project:
+            label_config = """<View>
+            <Labels name="label" toName="text">
+                <Label value="GRANTOR" background="green"/>
+                <Label value="GRANTEE" background="blue"/>
+                <Label value="RECORDING_DATE" background="red"/>
+                <Label value="INSTRUMENT_NUMBER" background="orange"/>
+                <Label value="BOOK_PAGE" background="purple"/>
+                <Label value="DATED_DATE" background="brown"/>
+            </Labels>
+            <Text name="text" value="$text"/>
+            </View>"""
+
+            try:
+                project_resp = ls.projects.create(
+                    title=project_title,
+                    label_config=label_config
+                )
+                project = ls.projects.get(project_resp.id)
+                logger.debug(project)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Project creation failed: {str(e)}")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Project creation failed: {str(e)}")
+
+    # Step 5: Add task
+    try:
+        result = ls.projects.import_tasks(
+            id=project.id,
+            request=[{"data": {"text": cleaned_text}}]
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Task import failed: {str(e)}")
+
 
     return {
         "message": "PDF extracted and task sent to Label Studio",
         "pages": total_pages,
         "filename": file.filename,
-        "response": resp.json()
+        "label_studio_project_id": project.id,
+        "task_result": result
     }

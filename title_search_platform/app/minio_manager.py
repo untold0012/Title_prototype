@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 # MinIO connection details from environment variables
 # MINIO_ENDPOINT should be only host:port (e.g., 'localhost:9000'), no path allowed
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000").replace("http://", "").replace("https://", "")
+
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "title-search-bucket")
@@ -29,7 +30,7 @@ class MinioMetadataManager:
             cls._instance = super(MinioMetadataManager, cls).__new__(cls)
             try:
                 cls.minio_client = Minio(
-                    MINIO_ENDPOINT,
+                    endpoint=MINIO_ENDPOINT,
                     access_key=MINIO_ACCESS_KEY,
                     secret_key=MINIO_SECRET_KEY,
                     secure=False

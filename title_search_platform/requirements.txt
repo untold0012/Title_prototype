@@ -38,6 +38,8 @@ torchaudio==2.1.0+cpu
 spacy==3.7.2
 lxml>=4.9.3
 
+label-studio-sdk>=0.0.26
+
 
 # Needed to get +cpu wheels from PyTorch
 -f https://download.pytorch.org/whl/torch_stable.html
