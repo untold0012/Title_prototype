@@ -14,9 +14,9 @@ services:
       minio:
         condition: service_healthy
     environment:
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET: ${MINIO_BUCKET}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
@@ -26,6 +26,9 @@ services:
       LABEL_STUDIO_URL: http://labelstudio:8080
       LABEL_STUDIO_TOKEN: ${LABEL_STUDIO_TOKEN}
       LABEL_STUDIO_PID: ${LABEL_STUDIO_PID}
+      LABELSTUDIO_TEXT_DIR: /label-studio/label_txt
+    volumes:
+      - ./app/training/labelstudio:/app/training/labelstudio
 
   db:
     image: mysql:8.0
@@ -72,6 +75,7 @@ services:
       - LABEL_STUDIO_PASSWORD=password
     volumes:
       - labelstudio_data:/label-studio/data
+      - ./app/training/labelstudio:/label-studio/label_txt
 
 volumes:
   db_data:
