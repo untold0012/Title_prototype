@@ -1,12 +1,14 @@
+import json
 import os
 import datetime
 import logging
+from pathlib import Path
+import subprocess
 from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.label_interface import LabelInterface
 from fastapi import UploadFile, File, HTTPException
 from typing import Annotated
 import os
-from app.entity_extractor import extract_entities_semantic
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
@@ -14,22 +16,24 @@ import io
 from typing import Annotated
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
+import cv2
+import numpy as np
 
-from app import minio_manager
+from app.minio_manager import minio_metadata_manager
 from app import db_manager
-from app.document_classifier import classify_doc_type
+# from app.document_classifier import classify_doc_type
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-_ = minio_manager.MinioMetadataManager()
 _ = db_manager.DBMetadataManager()
 
 router = APIRouter()
 
 LABEL_STUDIO_URL   = os.getenv("LABEL_STUDIO_URL", "http://labelstudio:8080")
-LABEL_STUDIO_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6ODA1ODM2NTk0OSwiaWF0IjoxNzUxMTY1OTQ5LCJqdGkiOiIzMmZlZGUwNDdiZjU0NTVmOWIxNTFjZjJmNTlmMjcxNSIsInVzZXJfaWQiOjJ9.EfpYrE1ZrH97eRj5aAFZPCVCMocp6FGYyeyMKZKhAls" 
+LABEL_STUDIO_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoicmVmcmVzaCIsImV4cCI6ODA1OTk4NDkzOSwiaWF0IjoxNzUyNzg0OTM5LCJqdGkiOiIyYmI4YmM5NWEyMjM0NDE3YmEzMmFhNzhjMzdmYTkzOCIsInVzZXJfaWQiOjJ9.44tEtjTw9q20qiw6fTWylprlwoAJzSBk4JQvldgrjZE" 
 LABEL_STUDIO_PID   = os.getenv("LABEL_STUDIO_PID", "1")
+PROJECT_TITLE = "NER Labeling (Auto)"
 
 class FileUploadResponse(BaseModel):
     db_id: int
@@ -44,6 +48,7 @@ class FileUploadResponse(BaseModel):
 class TextInput(BaseModel):
     text: str
 
+
 def extract_text_hybrid(file: UploadFile) -> tuple[int, str]:
     file.file.seek(0)
     file_bytes = file.file.read()
@@ -54,27 +59,66 @@ def extract_text_hybrid(file: UploadFile) -> tuple[int, str]:
 
     def is_scanned_page(page: fitz.Page) -> bool:
         text = page.get_text("text").strip()
-        if len(text) > 30:
+        if len(text) > 50:
             return False
         blocks = page.get_text("dict")["blocks"]
-        has_text_blocks = any(block.get("type") == 0 for block in blocks)
-        if has_text_blocks:
-            return False
+        has_text_blocks = any(block.get("type") == 0 and block.get("text", "").strip() for block in blocks)
         has_images = len(page.get_images(full=True)) > 0
-        return has_images or not text
+        return not has_text_blocks and has_images
+
+    def preprocess_image(pixmap: fitz.Pixmap) -> Image.Image:
+        pil_img = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("L")
+        img = np.array(pil_img)
+
+        # Deskew
+        coords = np.column_stack(np.where(img < 255))
+        if coords.shape[0] > 0:
+            angle = cv2.minAreaRect(coords)[-1]
+            if angle < -45:
+                angle = -(90 + angle)
+            else:
+                angle = -angle
+            (h, w) = img.shape[:2]
+            M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+            img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+        # Binarize
+        bin_img = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                        cv2.THRESH_BINARY, 11, 2)
+
+        # Resize small images
+        if bin_img.shape[0] < 1000:
+            bin_img = cv2.resize(bin_img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+        return Image.fromarray(bin_img)
+
+    def is_ocr_result_valid(text: str) -> bool:
+        lines = text.splitlines()
+        num_chars = len(text)
+        num_words = len(text.split())
+        ascii_ratio = sum(c.isascii() for c in text) / max(1, num_chars)
+        return num_chars > 100 and num_words > 15 and ascii_ratio > 0.85
 
     for i, page in enumerate(doc):
         try:
             if is_scanned_page(page):
-                pix = page.get_pixmap(dpi=300)
-                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-                ocr_text = pytesseract.image_to_string(img, lang="eng")
+                pix = page.get_pixmap(dpi=400)
+                img = preprocess_image(pix)
+                ocr_text = pytesseract.image_to_string(img, lang="eng", config="--psm 6 --oem 3")
+
+                # OCR quality check
+                if not is_ocr_result_valid(ocr_text):
+                    logger.warning(f"OCR result for page {i+1} appears low quality.")
+
                 extracted_text += f"--- Page {i+1} (OCR) ---\n{ocr_text.strip()}\n\n"
             else:
-                text = page.get_text().strip()
-                extracted_text += f"--- Page {i+1} (Text) ---\n{text}\n\n"
+                blocks = page.get_text("blocks")
+                block_texts = [b[4].strip() for b in blocks if isinstance(b[4], str) and b[4].strip()]
+                page_text = "\n".join(block_texts)
+                extracted_text += f"--- Page {i+1} (Text) ---\n{page_text.strip()}\n\n"
         except Exception as err:
             extracted_text += f"--- Page {i+1} ---\n[Error: {err}]\n\n"
+            logger.error(f"Error extracting page {i+1}: {err}")
 
     return total_pages, extracted_text.strip()
 
@@ -120,7 +164,7 @@ async def upload_pdf_file(file: Annotated[UploadFile, File()]):
     minio_object_name = filename
     logger.debug(f"Preparing to upload file: {filename}, size: {file_size}, pages: {total_pages}")
     try:
-        upload_etag = minio_manager.minio_metadata_manager.upload_file(
+        upload_etag = minio_metadata_manager.upload_file(
             file_data=file.file,
             object_name=minio_object_name,
             file_length=file_size
@@ -157,19 +201,41 @@ async def upload_pdf_file(file: Annotated[UploadFile, File()]):
         extracted_text=clean_text,
     )
 
-
-@router.post("/create-label-task/")
+@router.post("/create-label-task-donut/")
 async def create_label_task(file: Annotated[UploadFile, File()]):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # Step 1: Extract text
-    total_pages, extracted_text = extract_text_hybrid(file)
+    # Step 1: Convert PDF pages to images
+    file_bytes = await file.read()
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
 
-    # Step 2: Clean text
-    cleaned_text = clean_extracted_text(extracted_text)
+    page_urls = []
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(dpi=300)
+        img_bytes = pix.tobytes("png")
+        img_name = f"{Path(file.filename).stem}_page_{i+1}.png"
+        minio_path = f"labelstudio/images/{img_name}"
 
-    # Step 3: Connect to Label Studio
+        try:
+            minio_metadata_manager.upload_bytes_to_minio(
+                file_bytes=img_bytes,
+                object_name=minio_path,
+                content_type="image/png"
+            )
+            public_url = minio_metadata_manager.get_presigned_url(minio_path)
+            if public_url:
+                page_urls.append(public_url)
+            else:
+                logger.warning(f"Presigned URL is None for path: {minio_path}")
+        except Exception as e:
+            logger.error(f"Failed to upload or generate URL for {minio_path}: {e}")
+    print(f"Generated {page_urls} presigned URLs for Label Studio.")
+
+    if not page_urls:
+        raise HTTPException(status_code=500, detail="Failed to generate any presigned URLs for Label Studio.")
+
+    # Step 2: Connect to Label Studio
     try:
         ls = LabelStudio(
             base_url=os.getenv("LABEL_STUDIO_URL", "http://labelstudio:8080"),
@@ -178,55 +244,133 @@ async def create_label_task(file: Annotated[UploadFile, File()]):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Label Studio connection failed: {str(e)}")
 
-    # Step 4: Create or reuse project
-    project = None
-    project_title = "NER Labeling (Auto)"
+    # Step 3: Create or reuse project with multi-image layout
+    project_title = "Donut NER (Multi-Page Document)"
+    label_config = """
+        <View>
+        <Header value="Multi-page document. Label using JSON below."/>
+        <Image name="image" valueList="$images" zoom="true" />
+        <TextArea name="ground_truth" toName="image" editable="true" required="true"
+                    rows="10" value="$ground_truth"/>
+        </View>
+    """
+
     try:
-        for p in ls.projects.list():
-            if p.title == project_title:
-                project = p
-                break
-
+        project = next((p for p in ls.projects.list() if p.title == project_title), None)
         if not project:
-            label_config = """<View>
-            <Labels name="label" toName="text">
-                <Label value="GRANTOR" background="green"/>
-                <Label value="GRANTEE" background="blue"/>
-                <Label value="RECORDING_DATE" background="red"/>
-                <Label value="INSTRUMENT_NUMBER" background="orange"/>
-                <Label value="BOOK_PAGE" background="purple"/>
-                <Label value="DATED_DATE" background="brown"/>
-            </Labels>
-            <Text name="text" value="$text"/>
-            </View>"""
-
-            try:
-                project_resp = ls.projects.create(
-                    title=project_title,
-                    label_config=label_config
-                )
-                project = ls.projects.get(project_resp.id)
-                logger.debug(project)
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Project creation failed: {str(e)}")
-
+            project = ls.projects.create(title=project_title, label_config=label_config)
+        else:
+            project = ls.projects.get(project.id)
+            ls.projects.update(project.id, label_config=label_config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Project creation failed: {str(e)}")
 
-    # Step 5: Add task
+    # Step 4: Create one task per document, using list of image URLs
     try:
+        task_payload = [{
+            "images": page_urls,
+            "ground_truth": json.dumps({
+                "grantor": "",
+                "grantee": "",
+                "dated_date": "",
+                "recorded_date": "",
+                "consideration_amount": "",
+                "document_name": ""
+            }, indent=2),
+        }]
+
+
         result = ls.projects.import_tasks(
             id=project.id,
-            request=[{"data": {"text": cleaned_text}}]
+            request=task_payload
         )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Task import failed: {str(e)}")
 
-
     return {
-        "message": "PDF extracted and task sent to Label Studio",
-        "pages": total_pages,
-        "filename": file.filename,
+        "message": "Document sent to Label Studio as one task with multiple pages",
+        "pages": len(page_urls),
         "label_studio_project_id": project.id,
         "task_result": result
     }
+
+
+EXPORT_PATH = "/app/training/labelstudio/dev_data.json"
+SPACY_OUTPUT_PATH = "/app/training/labelstudio/dev.spacy"
+CONFIG_PATH = "app/training/config.cfg"
+OUTPUT_DIR = "app/training/labelstudio/output"
+
+@router.post("/export-and-train/")
+def export_convert_and_train():
+    try:
+        # Step 1: Connect to Label Studio
+        ls = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=LABEL_STUDIO_API_KEY)
+        project = ls.projects.get(LABEL_STUDIO_PID)
+
+        # Step 2: Export annotations to local disk
+        data = ls.projects.exports.as_json(project.id)
+        logger.info(f"Exported data from Label Studio project {data}")
+        try:
+            logger.info(f"Entering export directory: {os.path.dirname(EXPORT_PATH)}")
+            os.makedirs(os.path.dirname(EXPORT_PATH), exist_ok=True)
+            with open(EXPORT_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"❌ Failed to write export file: {e}")
+            raise
+
+        # # Step 3: Convert to spaCy format
+        # subprocess.run([
+        #     "python", "app/training/convert_to_spacy_format.py",
+        #     "--input", EXPORT_PATH,
+        #     "--output", SPACY_OUTPUT_PATH
+        # ], check=True)
+
+        # Step 4: Fill missing values in config
+        subprocess.run([
+            "python", "-m", "spacy", "init", "fill-config",
+            CONFIG_PATH, CONFIG_PATH
+        ], check=True)
+
+        # Step 5: Debug data
+        debug_result = subprocess.run([
+            "python", "-m", "spacy", "debug", "data", CONFIG_PATH,
+            "--paths.train", SPACY_OUTPUT_PATH,
+            "--paths.dev", SPACY_OUTPUT_PATH
+        ], capture_output=True, text=True)
+        if debug_result.returncode != 0:
+            print("❌ spaCy debug failed:")
+            print(debug_result.stdout)
+            print(debug_result.stderr)
+            raise RuntimeError("spaCy debug error")
+
+        # Step 6: Train spaCy model
+        result = subprocess.run([
+            "python", "-m", "spacy", "train", CONFIG_PATH,
+            "--output", OUTPUT_DIR,
+            "--paths.train", SPACY_OUTPUT_PATH,
+            "--paths.dev", SPACY_OUTPUT_PATH
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print("❌ spaCy training failed:")
+            print(result.stdout)
+            print(result.stderr)
+            raise RuntimeError("spaCy training error")
+        else:
+            print("✅ spaCy training succeeded")
+            print(result.stdout)
+
+        return {
+            "message": "Exported, converted, and trained successfully",
+            "export_file": EXPORT_PATH,
+            "spacy_format_file": SPACY_OUTPUT_PATH,
+            "model_output_dir": OUTPUT_DIR
+        }
+
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Script failed: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
