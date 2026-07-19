@@ -2,12 +2,14 @@ import os
 import datetime
 import logging
 
+import numpy as np
 import requests
 from app.entity_extractor import extract_entities_semantic
 import fitz  # PyMuPDF
-import pytesseract
+from paddleocr import PaddleOCR
 from PIL import Image
 import io
+from pathlib import Path
 from typing import Annotated
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
@@ -28,6 +30,8 @@ LABEL_STUDIO_URL   = os.getenv("LABEL_STUDIO_URL", "http://labelstudio:8080")
 LABEL_STUDIO_TOKEN = os.getenv("LABEL_STUDIO_TOKEN", "changeme")
 LABEL_STUDIO_PID   = os.getenv("LABEL_STUDIO_PID", "1")
 
+ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False, use_gpu=False)
+
 class FileUploadResponse(BaseModel):
     db_id: int
     filename: str
@@ -42,6 +46,24 @@ class FileUploadResponse(BaseModel):
 
 class TextInput(BaseModel):
     text: str
+
+def extract_text_with_paddleocr(image: Image.Image) -> str:
+    rgb_image = np.array(image.convert("RGB"))
+    ocr_result = ocr_engine.ocr(rgb_image, cls=True)
+
+    lines = []
+    for page_result in ocr_result or []:
+        for line in page_result or []:
+            if len(line) < 2:
+                continue
+            text_result = line[1]
+            if not isinstance(text_result, (list, tuple)) or not text_result:
+                continue
+            text = str(text_result[0]).strip()
+            if text:
+                lines.append(text)
+
+    return "\n".join(lines)
 
 def extract_text_hybrid(file: UploadFile) -> tuple[int, str]:
     file.file.seek(0)
@@ -67,7 +89,7 @@ def extract_text_hybrid(file: UploadFile) -> tuple[int, str]:
             if is_scanned_page(page):
                 pix = page.get_pixmap(dpi=300)
                 img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-                ocr_text = pytesseract.image_to_string(img, lang="eng")
+                ocr_text = extract_text_with_paddleocr(img)
                 extracted_text += f"--- Page {i+1} (OCR) ---\n{ocr_text.strip()}\n\n"
             else:
                 text = page.get_text().strip()
