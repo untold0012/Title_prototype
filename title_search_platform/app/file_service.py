@@ -29,6 +29,9 @@ router = APIRouter()
 LABEL_STUDIO_URL   = os.getenv("LABEL_STUDIO_URL", "http://labelstudio:8080")
 LABEL_STUDIO_TOKEN = os.getenv("LABEL_STUDIO_TOKEN", "changeme")
 LABEL_STUDIO_PID   = os.getenv("LABEL_STUDIO_PID", "1")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_REPORT_MODEL = os.getenv("OPENAI_REPORT_MODEL", "gpt-5.6-luna")
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 ocr_engine = PaddleOCR(use_angle_cls=True, lang="en", show_log=False, use_gpu=False)
 
@@ -47,6 +50,15 @@ class FileUploadResponse(BaseModel):
 class TextInput(BaseModel):
     text: str
 
+class ReportGenerationResponse(BaseModel):
+    filename: str
+    total_pages: int
+    document_type: str
+    extracted_entities: dict
+    extracted_text: str
+    report: str
+    openai_model: str
+
 def extract_text_with_paddleocr(image: Image.Image) -> str:
     rgb_image = np.array(image.convert("RGB"))
     ocr_result = ocr_engine.ocr(rgb_image, cls=True)
@@ -64,6 +76,83 @@ def extract_text_with_paddleocr(image: Image.Image) -> str:
                 lines.append(text)
 
     return "\n".join(lines)
+
+def parse_openai_response_text(response_json: dict) -> str:
+    output_text = response_json.get("output_text")
+    if output_text:
+        return output_text.strip()
+
+    text_parts = []
+    for output_item in response_json.get("output", []):
+        for content_item in output_item.get("content", []):
+            text = content_item.get("text")
+            if text:
+                text_parts.append(text)
+
+    return "\n".join(text_parts).strip()
+
+def generate_title_report(
+    extracted_text: str,
+    document_type: str,
+    extracted_entities: dict
+) -> str:
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY is not configured for report generation."
+        )
+
+    prompt = (
+        "Generate a concise title-search document report from the OCR/PDF text below.\n"
+        "Return Markdown with these sections:\n"
+        "1. Document Summary\n"
+        "2. Key Parties and Dates\n"
+        "3. Property / Recording Details\n"
+        "4. Title Search Relevance\n"
+        "5. Missing or Unclear Information\n\n"
+        "Do not invent facts. If a field is missing or unclear, say so.\n\n"
+        f"Detected document type: {document_type}\n"
+        f"Extracted entities: {extracted_entities}\n\n"
+        f"Document text:\n{extracted_text}"
+    )
+
+    payload = {
+        "model": OPENAI_REPORT_MODEL,
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You generate factual title-search reports from OCR text. "
+                    "Preserve uncertainty and avoid legal advice."
+                )
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.post(
+            OPENAI_RESPONSES_URL,
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI report generation failed: {str(e)}")
+
+    report = parse_openai_response_text(response.json())
+    if not report:
+        raise HTTPException(status_code=502, detail="OpenAI report generation returned an empty response.")
+
+    return report
 
 def extract_text_hybrid(file: UploadFile) -> tuple[int, str]:
     file.file.seek(0)
@@ -180,6 +269,34 @@ async def upload_pdf_file(file: Annotated[UploadFile, File()]):
         extracted_text=extracted_text,
         document_type=document_type,
         extracted_entities=extracted_entities
+    )
+
+@router.post("/generate-report/", response_model=ReportGenerationResponse)
+async def generate_report_from_pdf(file: Annotated[UploadFile, File()]):
+    if not (file.filename.lower().endswith(".pdf") or file.content_type == "application/pdf"):
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF files are accepted.")
+
+    try:
+        total_pages, extracted_text = extract_text_hybrid(file)
+        document_type = classify_doc_type(extracted_text)
+        extracted_entities = extract_entities_semantic(extracted_text, document_type)
+        report = generate_title_report(extracted_text, document_type, extracted_entities)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Report generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Report generation failed.")
+    finally:
+        await file.close()
+
+    return ReportGenerationResponse(
+        filename=file.filename,
+        total_pages=total_pages,
+        document_type=document_type,
+        extracted_entities=extracted_entities,
+        extracted_text=extracted_text,
+        report=report,
+        openai_model=OPENAI_REPORT_MODEL
     )
 
 @router.post("/create-label-task/")
