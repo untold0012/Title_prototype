@@ -40,8 +40,13 @@ Follow these steps to get the application running:
     MYSQL_PASSWORD=password_db
     MYSQL_ROOT_PASSWORD=root_password_db
     MYSQL_PORT=3306
+
+    # OpenAI report generation
+    OPENAI_API_KEY=your_openai_api_key
+    OPENAI_REPORT_MODEL=gpt-5.6-luna
     ```
     If you need to change any of these (e.g., for a production setup or if default ports conflict), update them accordingly. **For production, all default credentials must be changed.**
+    OpenAI report generation requires an API key; set `OPENAI_REPORT_MODEL` to any model enabled for your OpenAI project. If your account has access to a free or credit-backed OpenAI model, configure that model name here.
 
 3.  **Build and Run with Docker Compose:**
     Navigate to the root directory of the project (`title_search_platform`) where the `docker-compose.yml` file is located, and run:
@@ -60,7 +65,7 @@ Once the application is running, you can access its different components:
 *   **API Documentation (Swagger UI):**
     The FastAPI application provides interactive API documentation via Swagger UI.
     -   URL: [http://localhost:8000/docs](http://localhost:8000/docs)
-    -   You can use this interface to test the `/files/upload/` endpoint.
+    -   You can use this interface to test the `/files/upload/` and `/files/generate-report/` endpoints.
 
 *   **MinIO Console:**
     MinIO provides a web-based console for managing buckets and objects.
